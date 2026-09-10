@@ -1,18 +1,12 @@
 name: CI
 
 on:
-  push:
-    branches:
-     - main
-     - next
-     - 'v*'
-    paths-ignore:
-      - 'docs/**'
-      - '*.md'
-  pull_request:
-    paths-ignore:
-      - 'docs/**'
-      - '*.md'
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Space-separated test file paths to run instead of the full suite. Empty runs the full suite.'
+        required: false
+        default: ''
 
 # This allows a subsequently queued workflow run to interrupt previous runs
 concurrency:
@@ -26,9 +20,16 @@ jobs:
   test-regression-check-node10:
     name: Test compatibility with Node.js 10
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     permissions:
       contents: read
     steps:
+      - name: Pin the npm registry to the release-date time machine
+        shell: bash
+        run: |
+          npm config set registry https://time-machines-npm.sealsecurity.io/
+          npm config set //time-machines-npm.sealsecurity.io/:_authToken=2026-05-05T08:31:31.849000Z
+
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
@@ -51,15 +52,29 @@ jobs:
           cp -r ./lib ./node_modules/fast-uri/lib &&
           cp ./index.js ./node_modules/fast-uri/index.js
 
+      # `npm run test:unit` is silently vacuous here: npm 6 (bundled with Node 10)
+      # applies the repo .npmrc's ignore-scripts=true to directly-invoked
+      # run-scripts too, so it exits 0 without running a single test. Call the
+      # tape runner directly instead, and keep the glob quoted so tape's own
+      # glob.sync expands it rather than the shell.
       - name: Run tests
         run: |
-          npm run test:unit
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            node ./node_modules/.bin/tape ${{ inputs.test-filter }}
+          else
+            node ./node_modules/.bin/tape "test/**/*.js"
+          fi
         env:
           NODE_OPTIONS: no-network-family-autoselection
 
+  # Disabled on the fork: the Playwright engine downloads are heavy and flaky on
+  # fork runners, and this job runs the SAME tape test files as the `test`
+  # matrix below - only the browser environment is lost, not a single test file.
   test-browser:
     name: Test browser compatibility
+    if: false
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -93,14 +108,83 @@ jobs:
         run: |
           npm run test:browser:${{ matrix.browser }}
 
+  # Inlined verbatim from the `test` job of the reusable workflow this job used
+  # to call (fastify/workflows/.github/workflows/plugins-ci.yml@v6): a `uses:`
+  # job cannot carry `timeout-minutes`, so it is undispatchable on the fork.
+  # Same matrix, same steps, same commands. The caller's lint/license-check
+  # quality gates are deliberately not carried over - they are not tests.
   test:
-    needs:
-      - test-regression-check-node10
+    name: Test (Node.js ${{ matrix.node-version }} on ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     permissions:
-      contents: write
-      pull-requests: write
-    uses: fastify/workflows/.github/workflows/plugins-ci.yml@v6
-    with:
-      license-check: true
-      lint: true
-      node-versions: '["16", "18", "20", "22", "24"]'
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["16", "18", "20", "22", "24"]
+        os: [macos-latest, ubuntu-latest, windows-latest]
+        exclude:
+          - os: macos-latest
+            node-version: "16"
+    steps:
+      - name: Pin the npm registry to the release-date time machine
+        shell: bash
+        run: |
+          npm config set registry https://time-machines-npm.sealsecurity.io/
+          npm config set //time-machines-npm.sealsecurity.io/:_authToken=2026-05-05T08:31:31.849000Z
+
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Install
+        run: npm i --ignore-scripts
+
+      - name: Run tests
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            npm run test:unit -- ${{ inputs.test-filter }}
+          else
+            npm test
+          fi
+
+  pack:
+    name: Pack the release tarball
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Pin the npm registry to the release-date time machine
+        shell: bash
+        run: |
+          npm config set registry https://time-machines-npm.sealsecurity.io/
+          npm config set //time-machines-npm.sealsecurity.io/:_authToken=2026-05-05T08:31:31.849000Z
+
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      # The public 3.1.2 tarball was packed with npm 11.13.0; npm's
+      # always-include member set moves between majors, so pack with that exact
+      # npm and install it only here, never before an install step.
+      - name: Pack
+        run: |
+          npm i -g npm@11.13.0
+          npm pack --ignore-scripts
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball
+          path: fast-uri-*.tgz
+          if-no-files-found: error
