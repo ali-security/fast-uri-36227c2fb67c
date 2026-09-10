@@ -131,3 +131,55 @@ test('normalize does not double-decode %2540 into a live @', (t) => {
   t.plan(1)
   t.notEqual(parsed.host, 'trusted.com@evil.com', 'http://trusted.com%2540evil.com/')
 })
+
+test('parse canonicalises IDN / Unicode hosts to their ASCII form', (t) => {
+  const cases = [
+    {
+      input: 'http://127。0。0。1/',
+      expectedHost: '127.0.0.1',
+      description: 'full-width ideographic stops as octet separators'
+    },
+    {
+      input: 'http://ｅxample.com/',
+      expectedHost: 'example.com',
+      description: 'fullwidth e as first letter'
+    },
+    {
+      input: 'http://納豆.example.org/',
+      expectedHost: 'xn--99zt52a.example.org',
+      description: 'CJK label requiring punycode'
+    }
+  ]
+
+  t.plan(cases.length * 2)
+
+  cases.forEach(({ input, expectedHost, description }) => {
+    const parsed = fastURI.parse(input)
+    t.notOk(parsed.error, `parse should not set error: ${description}`)
+    t.equal(parsed.host, expectedHost, `host canonicalised to ASCII: ${description}`)
+  })
+})
+
+test('normalize and equal do not desynchronize on IDN / Unicode hosts', (t) => {
+  // U+3002 ideographic full stop, U+FF45 fullwidth latin e, and a CJK label:
+  // all three are mapped by UTS#46 but left untouched by the vulnerable code.
+  const fullWidthLoopback = 'http://127。0。0。1/'
+  const fullWidthLatin = 'http://ｅxample.com/'
+  const cjkLabel = 'http://納豆.example.org/'
+
+  t.plan(7)
+
+  // A loopback denylist keyed on the parsed host must not be bypassable by the
+  // full-width form that fetch()/WHATWG resolve to 127.0.0.1.
+  t.equal(fastURI.normalize(fullWidthLoopback), 'http://127.0.0.1/', 'normalize full-width loopback')
+  t.equal(fastURI.equal(fullWidthLoopback, 'http://127.0.0.1/'), true, 'equal full-width loopback')
+
+  t.equal(fastURI.normalize(fullWidthLatin), 'http://example.com/', 'normalize fullwidth latin label')
+  t.equal(fastURI.equal(fullWidthLatin, 'http://example.com/'), true, 'equal fullwidth latin label')
+
+  t.equal(fastURI.normalize(cjkLabel), 'http://xn--99zt52a.example.org/', 'normalize CJK label')
+  t.equal(fastURI.equal(cjkLabel, 'http://xn--99zt52a.example.org/'), true, 'equal CJK label')
+
+  // The domainHost option opens the same conversion up to non HTTP-family schemes.
+  t.equal(fastURI.parse('uri://納豆.example.org/', { domainHost: true }).host, 'xn--99zt52a.example.org', 'domainHost option canonicalises CJK label')
+})
